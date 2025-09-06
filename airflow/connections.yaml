@@ -1,0 +1,18 @@
+# Airflow connections configuration
+# This file should be placed in AIRFLOW_HOME/connections.yaml or configured via UI
+
+crm_postgres:
+  conn_type: postgres
+  host: crm_db
+  port: 5432
+  schema: crm_db
+  login: crm_user
+  password: crm_password
+
+olap_clickhouse:
+  conn_type: clickhouse
+  host: olap_db
+  port: 9000
+  schema: reports
+  login: default
+  password: "" 

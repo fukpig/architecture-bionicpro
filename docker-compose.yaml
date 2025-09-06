@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   keycloak_db:
-    image: postgres:14
+    image: postgres:14-bullseye
     environment:
       POSTGRES_DB: keycloak_db
       POSTGRES_USER: keycloak_user
@@ -11,6 +11,12 @@ services:
       - ./postgres-keycloak-data:/var/lib/postgresql/data
     ports:
       - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak_user -d keycloak_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
   keycloak:
     image: quay.io/keycloak/keycloak:21.1
     environment:
@@ -28,7 +34,14 @@ services:
     ports:
       - "8080:8080"
     depends_on:
-      - keycloak_db
+      keycloak_db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
   frontend:
     build:
       context: ./frontend
@@ -40,3 +53,85 @@ services:
       REACT_APP_KEYCLOAK_URL: http://localhost:8080
       REACT_APP_KEYCLOAK_REALM: reports-realm
       REACT_APP_KEYCLOAK_CLIENT_ID: reports-frontend
+    depends_on:
+      - backend
+  crm_db: 
+    image: postgres:14-bullseye
+    environment:
+      POSTGRES_DB: crm_db
+      POSTGRES_USER: crm_user
+      POSTGRES_PASSWORD: crm_password
+    volumes:
+        - ./crm-db:/docker-entrypoint-initdb.d
+        - ./postgres-crm-data:/var/lib/postgresql/data
+    ports:
+      - "5444:5432"
+  olap_db:
+    image: clickhouse/clickhouse-server:latest
+    ports:
+      - "8123:8123"
+      - "9431:9000"
+    volumes:
+      - ./clickhouse-data:/var/lib/clickhouse
+      - ./olap-db:/var/lib/clickhouse/user_files
+      - ./olap-db:/docker-entrypoint-initdb.d
+      - ./olap-db/users.xml:/etc/clickhouse-server/users.d/users.xml
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --query 'SELECT 1'"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      PORT: 8000
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: reports-realm
+      CLICKHOUSE_HOST: olap_db
+      CLICKHOUSE_PORT: 9000
+      CLICKHOUSE_DB: reports
+    depends_on:
+      - olap_db
+      - keycloak
+  airflow_db:
+    image: postgres:14-bullseye
+    environment:
+      POSTGRES_DB: airflow
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+    volumes:
+      - ./postgres-airflow-data:/var/lib/postgresql/data
+    ports:
+      - "5445:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+  airflow:
+    image: apache/airflow:2.8.1
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow_db:5432/airflow
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'true'
+      AIRFLOW__WEBSERVER__WEB_SERVER_PORT: '8080'
+      AIRFLOW__WEBSERVER__BASE_URL: 'http://localhost:8081'
+      AIRFLOW__CORE__FERNET_KEY: '4wOzwyg/Kp891S8Ao5pxCwQZaADcM2jTWGn6Zvu7Ijg='
+      _PIP_ADDITIONAL_REQUIREMENTS: 'clickhouse-driver psycopg2-binary'
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+    ports:
+      - "8081:8080"
+    depends_on:
+      airflow_db:
+        condition: service_healthy
+    command: ["bash", "/opt/airflow/dags/init-airflow.sh"]
